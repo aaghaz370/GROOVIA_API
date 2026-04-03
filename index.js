@@ -301,41 +301,45 @@ app.get('/api/song/:id', async (req, res) => {
     const { id } = req.params;
     const yt = await getYT();
     
-    // getInfo gives streaming data natively so device can play it independently
+    // Get metadata from YouTube Music
     const info = await yt.getInfo(id);
+    const title = info.basic_info.title || '';
+    const artist = info.basic_info.channel?.name || '';
 
+    // Clean the title for JioSaavn search
+    const cleanTitle = title.replace(/\(.*?\)/g, '').split('|')[0].trim();
+    const query = encodeURIComponent(`${cleanTitle} ${artist}`.trim());
+
+    // Use JioSaavn to get reliable audio stream (not IP-blocked)
     let audioUrl = null;
-    let videoUrl = null;
-
     try {
-      const ytdl = require('@distube/ytdl-core');
-      const streamInfo = await ytdl.getInfo(`https://www.youtube.com/watch?v=${id}`);
-      const audioFormat = ytdl.chooseFormat(streamInfo.formats, { quality: 'highestaudio' });
-      const videoFormat = ytdl.chooseFormat(streamInfo.formats, { quality: 'highestvideo' });
-      audioUrl = audioFormat?.url;
-      videoUrl = videoFormat?.url;
-    } catch (err) {
-      console.log('ytdl-core failed:', err.message);
-      // Fallback to youtubei.js
-      const formatData = info.chooseFormat({ type: 'audio', quality: 'best' });
-      audioUrl = formatData?.url;
+      const saavnRes = await fetch(`https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${query}`);
+      const saavnData = await saavnRes.json();
+      const results = saavnData?.data?.results;
+      if (results && results.length > 0) {
+        const links = results[0]?.downloadUrl || [];
+        if (links.length > 0) {
+          audioUrl = links[links.length - 1]?.link; // highest quality
+        }
+      }
+    } catch (saavnErr) {
+      console.log('JioSaavn lookup failed:', saavnErr.message);
     }
 
     res.json({
       success: true,
       data: {
         id: info.basic_info.id,
-        title: info.basic_info.title,
-        channel: info.basic_info.channel?.name,
+        title,
+        channel: artist,
         duration: info.basic_info.duration,
         view_count: info.basic_info.view_count,
         thumbnails: info.basic_info.thumbnail,
         description: info.basic_info.short_description,
         stream_urls: {
           audio: audioUrl,
-          video: videoUrl,
+          video: null,
         },
-        related_videos: info.related_Playlists || []
       }
     });
   } catch (error) {
