@@ -412,9 +412,9 @@ app.get('/', (req, res) => {
   res.json({ success: true, message: 'Welcome to Groovia API Engine (YouTube Music Unblocked)' });
 });
 
-// Start Server (Only for local development, Vercel handles this automatically)
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-  const PORT = process.env.PORT || 9090;
+// Start Server (Ignored by Vercel, used by Render/Local)
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Groovia API] Running on http://0.0.0.0:${PORT} (Accessible on LAN)`);
   });
