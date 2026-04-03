@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { Innertube, UniversalCache } = require('youtubei.js');
+const { Innertube, UniversalCache, ClientType } = require('youtubei.js');
 const axios = require('axios');
 const dotenv = require('dotenv');
 
@@ -11,8 +11,9 @@ app.use(cors());
 app.use(express.json());
 
 let ytAuth = null;
+let ytAndroid = null; // Android client — bypasses IP rate limiting like NewPipe does!
 
-// Initialize YouTubei (default client works best for continuation)
+// Web client for metadata browsing
 async function getYT() {
   if (!ytAuth) {
     ytAuth = await Innertube.create({
@@ -21,6 +22,18 @@ async function getYT() {
     });
   }
   return ytAuth;
+}
+
+// Android client for stream extraction — YouTube allows full access from Android clients
+async function getAndroidYT() {
+  if (!ytAndroid) {
+    ytAndroid = await Innertube.create({
+      client_type: ClientType.ANDROID,
+      cache: new UniversalCache(false),
+      generate_session_locally: true,
+    });
+  }
+  return ytAndroid;
 }
 
 // Convert thumbnail URLs to beautiful High Resolution (max quality, no compression)
@@ -299,31 +312,58 @@ app.get('/api/search', async (req, res) => {
 app.get('/api/song/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const yt = await getYT();
     
-    // Get metadata from YouTube Music
-    const info = await yt.getInfo(id);
+    // Use Android client for stream extraction (bypasses IP blocks like NewPipe)
+    const ytA = await getAndroidYT();
+    const info = await ytA.getInfo(id);
+    
     const title = info.basic_info.title || '';
     const artist = info.basic_info.channel?.name || '';
 
-    // Clean the title for JioSaavn search
-    const cleanTitle = title.replace(/\(.*?\)/g, '').split('|')[0].trim();
-    const query = encodeURIComponent(`${cleanTitle} ${artist}`.trim());
-
-    // Use JioSaavn to get reliable audio stream (not IP-blocked)
+    // Extract audio streams directly from Android client response
     let audioUrl = null;
     try {
-      const saavnRes = await fetch(`https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${query}`);
-      const saavnData = await saavnRes.json();
-      const results = saavnData?.data?.results;
-      if (results && results.length > 0) {
-        const links = results[0]?.downloadUrl || [];
-        if (links.length > 0) {
-          audioUrl = links[links.length - 1]?.link; // highest quality
+      const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+      audioUrl = format?.url || null;
+      console.log(`[Song] Android client extracted audio URL: ${audioUrl ? 'SUCCESS' : 'null'}`);
+    } catch (fmtErr) {
+      console.log('[Song] Android format extraction failed:', fmtErr.message);
+    }
+
+    // If Android client URL fails, try streaming info differently
+    if (!audioUrl) {
+      try {
+        const streamingData = info.streaming_data;
+        if (streamingData?.adaptive_formats) {
+          const audioFormats = streamingData.adaptive_formats
+            .filter(f => f.mime_type?.includes('audio'))
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+          if (audioFormats.length > 0) {
+            audioUrl = audioFormats[0].url;
+            console.log('[Song] Got URL from streaming_data adaptive_formats');
+          }
         }
+      } catch (sdErr) {
+        console.log('[Song] streaming_data extraction failed:', sdErr.message);
       }
-    } catch (saavnErr) {
-      console.log('JioSaavn lookup failed:', saavnErr.message);
+    }
+
+    // Last resort: JioSaavn title search
+    if (!audioUrl) {
+      try {
+        const cleanTitle = title.replace(/\(.*?\)/g, '').split('|')[0].trim();
+        const q = encodeURIComponent(`${cleanTitle} ${artist}`.trim());
+        const saavnRes = await fetch(`https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=${q}`);
+        const saavnData = await saavnRes.json();
+        const results = saavnData?.data?.results;
+        if (results?.length > 0) {
+          const links = results[0]?.downloadUrl || [];
+          if (links.length > 0) audioUrl = links[links.length - 1]?.link;
+          console.log('[Song] JioSaavn fallback:', audioUrl ? 'SUCCESS' : 'no URL');
+        }
+      } catch (saavnErr) {
+        console.log('[Song] JioSaavn fallback failed:', saavnErr.message);
+      }
     }
 
     res.json({
@@ -333,16 +373,12 @@ app.get('/api/song/:id', async (req, res) => {
         title,
         channel: artist,
         duration: info.basic_info.duration,
-        view_count: info.basic_info.view_count,
         thumbnails: info.basic_info.thumbnail,
-        description: info.basic_info.short_description,
-        stream_urls: {
-          audio: audioUrl,
-          video: null,
-        },
+        stream_urls: { audio: audioUrl, video: null },
       }
     });
   } catch (error) {
+    console.log('[Song] Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
